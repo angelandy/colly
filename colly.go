@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -407,28 +408,28 @@ func (c *Collector) Appengine(ctx context.Context) {
 // Visit also calls the previously provided callbacks
 func (c *Collector) Visit(URL string) error {
 	if c.CheckHead {
-		if check := c.scrape(URL, "HEAD", 1, nil, nil, nil, true); check != nil {
+		if check := c.scrape(URL, "HEAD", 1, nil, nil, nil, nil, true); check != nil {
 			return check
 		}
 	}
-	return c.scrape(URL, "GET", 1, nil, nil, nil, true)
+	return c.scrape(URL, "GET", 1, nil, nil, nil, nil, true)
 }
 
 // Head starts a collector job by creating a HEAD request.
 func (c *Collector) Head(URL string) error {
-	return c.scrape(URL, "HEAD", 1, nil, nil, nil, false)
+	return c.scrape(URL, "HEAD", 1, nil, nil, nil, nil, false)
 }
 
 // Post starts a collector job by creating a POST request.
 // Post also calls the previously provided callbacks
 func (c *Collector) Post(URL string, requestData map[string]string) error {
-	return c.scrape(URL, "POST", 1, createFormReader(requestData), nil, nil, true)
+	return c.scrape(URL, "POST", 1, createFormReader(requestData), requestData, nil, nil, true)
 }
 
 // PostRaw starts a collector job by creating a POST request with raw binary data.
 // Post also calls the previously provided callbacks
 func (c *Collector) PostRaw(URL string, requestData []byte) error {
-	return c.scrape(URL, "POST", 1, bytes.NewReader(requestData), nil, nil, true)
+	return c.scrape(URL, "POST", 1, bytes.NewReader(requestData), nil, nil, nil, true)
 }
 
 // PostMultipart starts a collector job by creating a Multipart POST request
@@ -438,7 +439,7 @@ func (c *Collector) PostMultipart(URL string, requestData map[string][]byte) err
 	hdr := http.Header{}
 	hdr.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	hdr.Set("User-Agent", c.UserAgent)
-	return c.scrape(URL, "POST", 1, createMultipartReader(boundary, requestData), nil, hdr, true)
+	return c.scrape(URL, "POST", 1, createMultipartReader(boundary, requestData), nil, nil, hdr, true)
 }
 
 // Request starts a collector job by creating a custom HTTP request
@@ -453,7 +454,7 @@ func (c *Collector) PostMultipart(URL string, requestData map[string][]byte) err
 //   - "PATCH"
 //   - "OPTIONS"
 func (c *Collector) Request(method, URL string, requestData io.Reader, ctx *Context, hdr http.Header) error {
-	return c.scrape(URL, method, 1, requestData, ctx, hdr, true)
+	return c.scrape(URL, method, 1, requestData, nil, ctx, hdr, true)
 }
 
 // SetDebugger attaches a debugger to the collector
@@ -466,6 +467,24 @@ func (c *Collector) SetDebugger(d debug.Debugger) {
 func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 	req := &serializableRequest{}
 	err := json.Unmarshal(r, req)
+	dst, err := base64.StdEncoding.DecodeString(req.RequestDataOrign)
+
+	if err != nil {
+		panic("UnmarshalRequest失败")
+	}
+	var dstStr interface{}
+	if req.RequestDataOrignType == "map" {
+		dstStr = make(map[string]string)
+		err = json.Unmarshal(dst, &dstStr)
+		if err != nil {
+			panic(err)
+		}
+	} else if req.RequestDataOrignType == "byte" {
+		dstStr = dst
+	} else {
+		dstStr = string(dst)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -481,17 +500,18 @@ func (c *Collector) UnmarshalRequest(r []byte) (*Request, error) {
 	}
 
 	return &Request{
-		Method:    req.Method,
-		URL:       u,
-		Body:      bytes.NewReader(req.Body),
-		Ctx:       ctx,
-		ID:        atomic.AddUint32(&c.requestCount, 1),
-		Headers:   &req.Headers,
-		collector: c,
+		Method:           req.Method,
+		URL:              u,
+		Body:             bytes.NewReader(req.Body),
+		RequestDataOrign: dstStr,
+		Ctx:              ctx,
+		ID:               atomic.AddUint32(&c.requestCount, 1),
+		Headers:          &req.Headers,
+		collector:        c,
 	}, nil
 }
 
-func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, checkRevisit bool) error {
+func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, requestDataOrign interface{}, ctx *Context, hdr http.Header, checkRevisit bool) error {
 	if err := c.requestCheck(u, method, depth, checkRevisit); err != nil {
 		return err
 	}
@@ -534,10 +554,10 @@ func (c *Collector) scrape(u, method string, depth int, requestData io.Reader, c
 	u = parsedURL.String()
 	c.wg.Add(1)
 	if c.Async {
-		go c.fetch(u, method, depth, requestData, ctx, hdr, req)
+		go c.fetch(u, method, depth, requestData, requestDataOrign, ctx, hdr, req)
 		return nil
 	}
-	return c.fetch(u, method, depth, requestData, ctx, hdr, req)
+	return c.fetch(u, method, depth, requestData, requestDataOrign, ctx, hdr, req)
 }
 
 func setRequestBody(req *http.Request, body io.Reader) {
@@ -572,20 +592,21 @@ func setRequestBody(req *http.Request, body io.Reader) {
 	}
 }
 
-func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, ctx *Context, hdr http.Header, req *http.Request) error {
+func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, requestDataOrign interface{}, ctx *Context, hdr http.Header, req *http.Request) error {
 	defer c.wg.Done()
 	if ctx == nil {
 		ctx = NewContext()
 	}
 	request := &Request{
-		URL:       req.URL,
-		Headers:   &req.Header,
-		Ctx:       ctx,
-		Depth:     depth,
-		Method:    method,
-		Body:      requestData,
-		collector: c,
-		ID:        atomic.AddUint32(&c.requestCount, 1),
+		URL:              req.URL,
+		Headers:          &req.Header,
+		Ctx:              ctx,
+		Depth:            depth,
+		Method:           method,
+		Body:             requestData,
+		RequestDataOrign: requestDataOrign,
+		collector:        c,
+		ID:               atomic.AddUint32(&c.requestCount, 1),
 	}
 
 	c.handleOnRequest(request)

@@ -16,6 +16,7 @@ package colly
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"io/ioutil"
@@ -42,6 +43,8 @@ type Request struct {
 	// ResponseCharacterencoding is the character encoding of the response body.
 	// Leave it blank to allow automatic character encoding of the response body.
 	// It is empty by default and it can be set in OnRequest callback.
+	RequestDataOrign interface{}
+
 	ResponseCharacterEncoding string
 	// ID is the Unique identifier of the request
 	ID        uint32
@@ -53,12 +56,14 @@ type Request struct {
 }
 
 type serializableRequest struct {
-	URL     string
-	Method  string
-	Body    []byte
-	ID      uint32
-	Ctx     map[string]interface{}
-	Headers http.Header
+	URL                  string
+	Method               string
+	Body                 []byte
+	RequestDataOrign     string
+	RequestDataOrignType string
+	ID                   uint32
+	Ctx                  map[string]interface{}
+	Headers              http.Header
 }
 
 // New creates a new request with the context of the original request
@@ -75,6 +80,35 @@ func (r *Request) New(method, URL string, body io.Reader) (*Request, error) {
 		Headers:   &http.Header{},
 		ID:        atomic.AddUint32(&r.collector.requestCount, 1),
 		collector: r.collector,
+	}, nil
+}
+
+func (r *Request) NewPost(method, URL string, requestData interface{}) (*Request, error) {
+	u, err := url.Parse(URL)
+	if err != nil {
+		return nil, err
+	}
+
+	var body io.Reader
+	switch rd := requestData.(type) {
+	case map[string]string:
+		body = createFormReader(rd)
+	case []byte:
+		body = bytes.NewReader(rd)
+	case string:
+		body = bytes.NewReader([]byte(rd))
+	default:
+		panic("无法处理这种数据类型")
+	}
+	return &Request{
+		Method:           method,
+		URL:              u,
+		Body:             body,
+		RequestDataOrign: requestData,
+		Ctx:              r.Ctx,
+		Headers:          &http.Header{},
+		ID:               atomic.AddUint32(&r.collector.requestCount, 1),
+		collector:        r.collector,
 	}, nil
 }
 
@@ -111,21 +145,21 @@ func (r *Request) AbsoluteURL(u string) string {
 // request and preserves the Context of the previous request.
 // Visit also calls the previously provided callbacks
 func (r *Request) Visit(URL string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil, r.Ctx, nil, true)
+	return r.collector.scrape(r.AbsoluteURL(URL), "GET", r.Depth+1, nil, nil, r.Ctx, nil, true)
 }
 
 // Post continues a collector job by creating a POST request and preserves the Context
 // of the previous request.
 // Post also calls the previously provided callbacks
 func (r *Request) Post(URL string, requestData map[string]string) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, createFormReader(requestData), r.Ctx, nil, true)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, createFormReader(requestData), requestData, r.Ctx, nil, true)
 }
 
 // PostRaw starts a collector job by creating a POST request with raw binary data.
 // PostRaw preserves the Context of the previous request
 // and calls the previously provided callbacks
 func (r *Request) PostRaw(URL string, requestData []byte) error {
-	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, bytes.NewReader(requestData), r.Ctx, nil, true)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, bytes.NewReader(requestData), requestData, r.Ctx, nil, true)
 }
 
 // PostMultipart starts a collector job by creating a Multipart POST request
@@ -136,17 +170,17 @@ func (r *Request) PostMultipart(URL string, requestData map[string][]byte) error
 	hdr := http.Header{}
 	hdr.Set("Content-Type", "multipart/form-data; boundary="+boundary)
 	hdr.Set("User-Agent", r.collector.UserAgent)
-	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, createMultipartReader(boundary, requestData), r.Ctx, hdr, true)
+	return r.collector.scrape(r.AbsoluteURL(URL), "POST", r.Depth+1, createMultipartReader(boundary, requestData), requestData, r.Ctx, hdr, true)
 }
 
 // Retry submits HTTP request again with the same parameters
 func (r *Request) Retry() error {
-	return r.collector.scrape(r.URL.String(), r.Method, r.Depth, r.Body, r.Ctx, *r.Headers, false)
+	return r.collector.scrape(r.URL.String(), r.Method, r.Depth, r.Body, r.RequestDataOrign, r.Ctx, *r.Headers, false)
 }
 
 // Do submits the request
 func (r *Request) Do() error {
-	return r.collector.scrape(r.URL.String(), r.Method, r.Depth, r.Body, r.Ctx, *r.Headers, !r.collector.AllowURLRevisit)
+	return r.collector.scrape(r.URL.String(), r.Method, r.Depth, r.Body, r.RequestDataOrign, r.Ctx, *r.Headers, !r.collector.AllowURLRevisit)
 }
 
 // Marshal serializes the Request
@@ -166,12 +200,30 @@ func (r *Request) Marshal() ([]byte, error) {
 			return nil, err
 		}
 	}
+
+
+	requestDataOrignType := "string"
+	var rd string
+	switch vv := r.RequestDataOrign.(type) {
+	case map[string]string:
+		requestDataOrignType = "map"
+		rdj,_ := json.Marshal(vv)
+		rd =  base64.StdEncoding.EncodeToString(rdj)
+	case string:
+		rd =  base64.StdEncoding.EncodeToString([]byte(vv))
+	case []byte:
+		requestDataOrignType = "byte"
+		rd =  base64.StdEncoding.EncodeToString(vv)
+	}
+
 	sr := &serializableRequest{
-		URL:    r.URL.String(),
-		Method: r.Method,
-		Body:   body,
-		ID:     r.ID,
-		Ctx:    ctx,
+		URL:              r.URL.String(),
+		Method:           r.Method,
+		Body:             body,
+		RequestDataOrign: rd,
+		RequestDataOrignType:requestDataOrignType,
+		ID:               r.ID,
+		Ctx:              ctx,
 	}
 	if r.Headers != nil {
 		sr.Headers = *r.Headers

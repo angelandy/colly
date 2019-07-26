@@ -4,7 +4,6 @@ import (
 	"net/url"
 	"sync"
 	"sync/atomic"
-
 	"github.com/gocolly/colly"
 )
 
