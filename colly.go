@@ -51,6 +51,10 @@ import (
 	"github.com/gocolly/colly/storage"
 )
 
+type Collect interface {
+	OnResponse(*Response)
+}
+
 // Collector provides the scraper instance for a scraping job
 type Collector struct {
 	// UserAgent is the User-Agent string used by HTTP requests
@@ -120,6 +124,7 @@ type Collector struct {
 	backend           *httpBackend
 	wg                *sync.WaitGroup
 	lock              *sync.RWMutex
+	Collect           Collect
 }
 
 // RequestCallback is a type alias for OnRequest callback functions
@@ -643,7 +648,6 @@ func (c *Collector) fetch(u, method string, depth int, requestData io.Reader, re
 	if err != nil {
 		return err
 	}
-
 	c.handleOnResponse(response)
 
 	err = c.handleOnHTML(response)
@@ -776,6 +780,10 @@ func (c *Collector) OnRequest(f RequestCallback) {
 	}
 	c.requestCallbacks = append(c.requestCallbacks, f)
 	c.lock.Unlock()
+}
+
+func (c *Collector) SetCollect(cc Collect) {
+	c.Collect = cc
 }
 
 // OnResponse registers a function. Function will be executed on every response
@@ -964,8 +972,13 @@ func (c *Collector) handleOnResponse(r *Response) {
 			"status": http.StatusText(r.StatusCode),
 		}))
 	}
-	for _, f := range c.responseCallbacks {
-		f(r)
+
+	if c.Collect == nil {
+		for _, f := range c.responseCallbacks {
+			f(r)
+		}
+	} else {
+		c.Collect.OnResponse(r)
 	}
 }
 
