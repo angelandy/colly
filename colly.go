@@ -972,7 +972,6 @@ func (c *Collector) handleOnResponse(r *Response) {
 			"status": http.StatusText(r.StatusCode),
 		}))
 	}
-
 	if c.Collect == nil {
 		for _, f := range c.responseCallbacks {
 			f(r)
