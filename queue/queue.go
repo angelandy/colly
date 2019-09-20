@@ -1,10 +1,13 @@
 package queue
 
 import (
+	"github.com/gocolly/colly"
 	"net/url"
 	"sync"
 	"sync/atomic"
-	"github.com/gocolly/colly"
+	"os"
+	"bufio"
+	"io"
 )
 
 const stop = true
@@ -20,6 +23,12 @@ type Storage interface {
 	GetRequest() ([]byte, error)
 	// QueueSize returns with the size of the queue
 	QueueSize() (int, error)
+	//Add by angelandy for dump Request to a file
+	DumpRequest(string) (error)
+	//Add by angelandy for import Request from a file
+	ImportRequest(string) (error)
+	//Add by angelandy for flush Request
+	FlushRequest()
 }
 
 // Queue is a request queue which uses a Collector to consume
@@ -111,6 +120,18 @@ func (q *Queue) AddRequest(r *colly.Request) error {
 // Size returns the size of the queue
 func (q *Queue) Size() (int, error) {
 	return q.storage.QueueSize()
+}
+
+func (q *Queue) Dump(filepath string) error {
+	return q.storage.DumpRequest(filepath)
+}
+
+func (q *Queue) Source(filepath string) error {
+	return q.storage.ImportRequest(filepath)
+}
+
+func (q *Queue) Flush() {
+	q.storage.FlushRequest()
 }
 
 // Run starts consumer threads and calls the Collector
@@ -210,4 +231,75 @@ func (q *InMemoryQueueStorage) QueueSize() (int, error) {
 	q.lock.Lock()
 	defer q.lock.Unlock()
 	return q.size, nil
+}
+
+//Add by angelandy for dump Request to a file
+func (q *InMemoryQueueStorage) DumpRequest(filepath string) (err error) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	if q.size == 0 {
+		return nil
+	}
+
+	fff,err := os.OpenFile(filepath, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0666)
+	if err != nil {
+		return
+	}
+
+	for q.size > 0 {
+		r := q.first.Request
+		fff.Write(r)
+		_,err = fff.WriteString("\n")
+		q.first = q.first.Next
+		q.size--
+	}
+	fff.Close()
+
+	return
+
+}
+
+//Add by angelandy for flush Request
+func (q *InMemoryQueueStorage) FlushRequest() {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	for q.size > 0 {
+		q.first = q.first.Next
+		q.size--
+	}
+
+}
+
+//Add by angelandy for dump Request to a file
+func (q *InMemoryQueueStorage) ImportRequest(filepath string) (err error) {
+	q.lock.Lock()
+	defer q.lock.Unlock()
+
+	fp, err := os.Open(filepath) // 获取文件指针
+	if err != nil {
+		return err
+	}
+	defer fp.Close()
+	bufReader := bufio.NewReader(fp)
+	for {
+		line, _, err := bufReader.ReadLine()
+		if err != nil {
+			if err == io.EOF {
+				err = nil
+				break
+			}
+		} else {
+			i := &inMemoryQueueItem{Request: line}
+			if q.first == nil {
+				q.first = i
+			} else {
+				q.last.Next = i
+			}
+			q.last = i
+			q.size++
+		}
+	}
+	return
 }
